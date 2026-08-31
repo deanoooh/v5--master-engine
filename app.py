@@ -31,16 +31,26 @@ def init_db():
 
 init_db()
 
-# Helper to clean horse names (handles direct-attached gear codes like 'Fivep')
+# Safe Horse Name Cleaning (Prevents truncating legitimate letters like 'e', 'h', 'c', 'p')
 def clean_horse_name(raw_name):
     if not raw_name:
         return ""
     name = str(raw_name).strip()
-    # Strip trailing numbers (days off)
-    name = re.sub(r'\d+[a-zA-Z]?$', '', name).strip()
-    # Strip common gear suffix codes attached to end of names (p, v, h, b, e, t, c)
-    name = re.sub(r'(?<=[a-zA-z]{3})[pvhbetc]$', '', name, flags=re.I).strip()
-    return name
+    
+    # Remove country suffix like (IRE), (FR), (USA) first if present
+    country_suffix = ""
+    country_match = re.search(r'\s*\([A-Z]{2,3}\)$', name)
+    if country_match:
+        country_suffix = country_match.group(0)
+        name = name[:country_match.start()].strip()
+        
+    # Remove trailing form numbers (e.g. "Horse Name 14")
+    name = re.sub(r'\s+\d+$', '', name).strip()
+    
+    # Only remove gear codes if they appear in brackets or after a distinct space/hyphen (e.g., "Horse (p)", "Horse b")
+    name = re.sub(r'[\s\-\(]+[pvhbetc1-9]\)?$', '', name, flags=re.I).strip()
+    
+    return name + country_suffix
 
 # Sporting Life Scraper Function
 def parse_sporting_life_racecard(url):
@@ -56,10 +66,10 @@ def parse_sporting_life_racecard(url):
         race_id_match = re.search(r'/racecard/(\d+)', url)
         time_str = ""
         
-        # Method 1: Try parsing HH:MM or HH-MM directly from the URL text string
-        url_time = re.search(r'/(\d{2})[:\-](\d{2})\b', url)
-        if url_time:
-            time_str = f"{url_time.group(1)}:{url_time.group(2)}"
+        # 1. Try parsing time from URL slug (e.g., /14-15/ or /1645/ or /16-45/)
+        url_time_match = re.search(r'/(\d{2})[-:]?(\d{2})/', url)
+        if url_time_match:
+            time_str = f"{url_time_match.group(1)}:{url_time_match.group(2)}"
         
         if race_id_match:
             race_id = race_id_match.group(1)
@@ -74,14 +84,15 @@ def parse_sporting_life_racecard(url):
                     
                 course = race_info.get('course_name', race_info.get('meeting_name', 'Unknown'))
                 
-                # Method 2: Check API parameters if URL didn't have time
+                # 2. Parse Time from API payload if not captured from URL
                 if not time_str:
-                    raw_time = race_info.get('time') or race_info.get('race_time') or race_info.get('time_str')
+                    raw_time = race_info.get('time') or race_info.get('race_time') or race_info.get('time_str') or race_info.get('time_formatted')
                     if raw_time:
-                        t_match = re.search(r'\b([0-2]?[0-9]:[0-5][0-9])\b', str(raw_time))
+                        t_match = re.search(r'(\d{1,2}:\d{2})', str(raw_time))
                         if t_match:
                             time_str = t_match.group(1)
                 
+                # 3. Check ISO Date string in API (e.g., "2026-08-31T14:15:00")
                 if not time_str and race_info.get('date'):
                     t_match = re.search(r'T(\d{2}:\d{2})', str(race_info['date']))
                     if t_match:
@@ -115,7 +126,7 @@ def parse_sporting_life_racecard(url):
                 }
                 return meta, runners
 
-        # Method 3: Fallback Page Parser
+        # 4. Fallback Page Parser (HTML)
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -128,7 +139,7 @@ def parse_sporting_life_racecard(url):
         
         if not time_str:
             page_title = soup.title.string if soup.title else ""
-            time_match = re.search(r'\b([0-2]?[0-9]:[0-5][0-9])\b', page_title)
+            time_match = re.search(r'(\d{1,2}:\d{2})', page_title)
             if time_match:
                 time_str = time_match.group(1)
             else:
@@ -149,6 +160,7 @@ def parse_sporting_life_racecard(url):
 
     except Exception as e:
         return None, f"Parsing Error: {str(e)}"
+
 # Interface Layout
 st.title("🏇 v5.26.4 Master Engine Dashboard")
 
