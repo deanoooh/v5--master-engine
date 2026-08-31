@@ -31,24 +31,24 @@ def init_db():
 
 init_db()
 
-# Safe Horse Name Cleaning (Prevents truncating legitimate letters like 'e', 'h', 'c', 'p')
+# Horse Name Cleaner (Strips appended gear letters like 'p','v' AND days-off numbers like '10','66')
 def clean_horse_name(raw_name):
     if not raw_name:
         return ""
     name = str(raw_name).strip()
     
-    # Remove country suffix like (IRE), (FR), (USA) first if present
+    # 1. Preserve country code suffix if present (e.g. "(IRE)", "(FR)")
     country_suffix = ""
     country_match = re.search(r'\s*\([A-Z]{2,3}\)$', name)
     if country_match:
         country_suffix = country_match.group(0)
         name = name[:country_match.start()].strip()
         
-    # Remove trailing form numbers (e.g. "Horse Name 14")
-    name = re.sub(r'\s+\d+$', '', name).strip()
+    # 2. Strip trailing gear letters + days-off numbers (e.g. "Dawnp10" -> "Dawn", "Forcep66" -> "Force")
+    name = re.sub(r'[pvhbetcPVHBETC]?\d+$', '', name).strip()
     
-    # Only remove gear codes if they appear in brackets or after a distinct space/hyphen (e.g., "Horse (p)", "Horse b")
-    name = re.sub(r'[\s\-\(]+[pvhbetc1-9]\)?$', '', name, flags=re.I).strip()
+    # 3. Strip standalone gear suffix codes
+    name = re.sub(r'[\s\-\(]+[pvhbetcPVHBETC]\)?$', '', name).strip()
     
     return name + country_suffix
 
@@ -58,18 +58,21 @@ def parse_sporting_life_racecard(url):
         return None, "Empty URL"
         
     headers = {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-        'Accept': 'application/json, text/plain, */*'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://www.sportinglife.com/'
     }
     
     try:
-        race_id_match = re.search(r'/racecard/(\d+)', url)
         time_str = ""
+        course = "Unknown"
         
-        # 1. Try parsing time from URL slug (e.g., /14-15/ or /1645/ or /16-45/)
-        url_time_match = re.search(r'/(\d{2})[-:]?(\d{2})/', url)
-        if url_time_match:
-            time_str = f"{url_time_match.group(1)}:{url_time_match.group(2)}"
+        # 1. Extract Time directly from URL structure (e.g., /17-15/, /14:15/, /1645/)
+        url_time = re.search(r'/(\d{2})[:\-]?(\d{2})/', url)
+        if url_time:
+            time_str = f"{url_time.group(1)}:{url_time.group(2)}"
+
+        race_id_match = re.search(r'/racecard/(\d+)', url)
         
         if race_id_match:
             race_id = race_id_match.group(1)
@@ -84,15 +87,14 @@ def parse_sporting_life_racecard(url):
                     
                 course = race_info.get('course_name', race_info.get('meeting_name', 'Unknown'))
                 
-                # 2. Parse Time from API payload if not captured from URL
+                # Extract time from API if not already extracted from URL
                 if not time_str:
-                    raw_time = race_info.get('time') or race_info.get('race_time') or race_info.get('time_str') or race_info.get('time_formatted')
+                    raw_time = race_info.get('time') or race_info.get('race_time') or race_info.get('time_str')
                     if raw_time:
                         t_match = re.search(r'(\d{1,2}:\d{2})', str(raw_time))
                         if t_match:
                             time_str = t_match.group(1)
                 
-                # 3. Check ISO Date string in API (e.g., "2026-08-31T14:15:00")
                 if not time_str and race_info.get('date'):
                     t_match = re.search(r'T(\d{2}:\d{2})', str(race_info['date']))
                     if t_match:
@@ -115,35 +117,39 @@ def parse_sporting_life_racecard(url):
                             if clean_name and clean_name not in [x['horse'] for x in runners]:
                                 runners.append({'horse': clean_name, 'odds': str(odds)})
                 
-                if not time_str:
-                    time_str = "14:00"
+                if time_str:
+                    meta = {
+                        'title': f"{course} {time_str}",
+                        'course': course,
+                        'race_time': time_str,
+                        'active_runners': len(runners)
+                    }
+                    return meta, runners
 
-                meta = {
-                    'title': f"{course} {time_str}",
-                    'course': course,
-                    'race_time': time_str,
-                    'active_runners': len(runners)
-                }
-                return meta, runners
-
-        # 4. Fallback Page Parser (HTML)
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        # 2. Fallback HTML Scraping
+        response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
         parts = url.split('/')
-        course = "Unknown"
         for idx, p in enumerate(parts):
             if p == 'racecards' and idx + 2 < len(parts):
                 course = parts[idx + 2].capitalize()
                 break
         
+        # Pull race time from page headers/titles if missing
         if not time_str:
             page_title = soup.title.string if soup.title else ""
             time_match = re.search(r'(\d{1,2}:\d{2})', page_title)
             if time_match:
                 time_str = time_match.group(1)
             else:
-                time_str = "14:00"
+                # Look inside header elements for time pattern
+                header_text = soup.get_text()
+                time_match = re.search(r'\b([0-2]?[0-9]:[0-5][0-9])\b', header_text)
+                if time_match:
+                    time_str = time_match.group(1)
+                else:
+                    time_str = "14:00"
 
         runners = []
         horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name', re.I))
