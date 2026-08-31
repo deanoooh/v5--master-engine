@@ -149,7 +149,6 @@ def parse_sporting_life_racecard(url):
 
     except Exception as e:
         return None, f"Parsing Error: {str(e)}"
-
 # Interface Layout
 st.title("🏇 v5.26.4 Master Engine Dashboard")
 
