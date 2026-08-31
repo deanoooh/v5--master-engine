@@ -5,6 +5,9 @@ import re
 import sqlite3
 from datetime import datetime
 
+# Debug toggle: set True while adapting parser to API responses, then set False
+DEBUG = False
+
 # Streamlit Page Config
 st.set_page_config(page_title="v5.26.4 Master Engine", page_icon="🏇", layout="wide")
 
@@ -48,6 +51,27 @@ def clean_horse_name(raw_name):
     
     return name + country_suffix
 
+# Helper: robust time parsing
+def _try_parse_time_value(val):
+    """Return 'HH:MM' if we can parse val, else None."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    # 1) HH:MM anywhere (e.g., ISO or plain)
+    m = re.search(r'(\d{2}:\d{2})', s)
+    if m:
+        return m.group(1)
+    # 2) Numeric epoch (string or number)
+    try:
+        num = float(s)
+        if num > 1000000000:
+            return datetime.fromtimestamp(num).strftime('%H:%M')
+    except Exception:
+        pass
+    return None
+
 # Sporting Life Scraper Function
 def parse_sporting_life_racecard(url):
     if not url or not url.strip():
@@ -81,23 +105,46 @@ def parse_sporting_life_racecard(url):
                 if isinstance(race_info, dict) and 'race' in race_info:
                     race_info = race_info['race']
                     
-                course = race_info.get('course_name', race_info.get('meeting_name', 'Unknown'))
+                course = race_info.get('course_name', race_info.get('meeting_name', course))
                 
                 # 2. Convert API time fields if URL check was empty
                 if not time_str:
-                    # Check for ISO date string e.g. "2026-08-31T16:45:00.000Z"
-                    date_val = race_info.get('date') or race_info.get('start_date') or race_info.get('race_date')
-                    if date_val:
-                        t_match = re.search(r'T(\d{2}:\d{2})', str(date_val))
-                        if t_match:
-                            time_str = t_match.group(1)
+                    candidate_fields = [
+                        'date', 'start_date', 'race_date', 'startTime', 'start_time', 'start',
+                        'scheduled', 'scheduled_time', 'scheduledStart', 'scheduled_start',
+                        'race_time', 'time', 'time_stamp', 'timestamp', 'utc_start', 'utc_start_time'
+                    ]
+                    # Try top-level fields
+                    for fld in candidate_fields:
+                        if fld in race_info:
+                            parsed = _try_parse_time_value(race_info.get(fld))
+                            if parsed:
+                                time_str = parsed
+                                break
 
-                    # Check for UNIX timestamp integer e.g. 1725119100
+                    # Try nested dicts if still empty (meeting/meta/race_details etc.)
                     if not time_str:
-                        timestamp = race_info.get('time_stamp') or race_info.get('timestamp') or race_info.get('time')
-                        if isinstance(timestamp, (int, float)) and timestamp > 1000000000:
-                            time_str = datetime.fromtimestamp(timestamp).strftime('%H:%M')
+                        for key in ['meeting', 'meta', 'race_details', 'details', 'meeting_info']:
+                            sub = race_info.get(key)
+                            if isinstance(sub, dict):
+                                for fld in candidate_fields:
+                                    if fld in sub:
+                                        parsed = _try_parse_time_value(sub.get(fld))
+                                        if parsed:
+                                            time_str = parsed
+                                            break
+                                if time_str:
+                                    break
 
+                    # DEV debug output to help tuning parser (only if DEBUG True)
+                    if not time_str and DEBUG:
+                        try:
+                            st.write(f"DEBUG: race_info keys for race {race_id}:", list(race_info.keys()))
+                            st.write("DEBUG: sample race_info repr:", str(race_info)[:1000])
+                        except Exception:
+                            pass
+
+                # Parse runners (unchanged logic)
                 runners = []
                 rides = race_info.get('rides', race_info.get('ride', []))
                 for r in rides:
@@ -115,11 +162,9 @@ def parse_sporting_life_racecard(url):
                             if clean_name and clean_name not in [x['horse'] for x in runners]:
                                 runners.append({'horse': clean_name, 'odds': str(odds)})
                 
-                if not time_str:
-                    time_str = "14:00"
-
+                # Do NOT force a magic default here. Leave time_str empty if unresolved.
                 meta = {
-                    'title': f"{course} {time_str}",
+                    'title': f"{course} {time_str}".strip(),
                     'course': course,
                     'race_time': time_str,
                     'active_runners': len(runners)
@@ -142,7 +187,37 @@ def parse_sporting_life_racecard(url):
             if time_match:
                 time_str = time_match.group(1)
             else:
-                time_str = "14:00"
+                # Check <time> tags
+                time_tag = soup.find('time')
+                if time_tag:
+                    # Prefer datetime attribute else text
+                    dt_attr = time_tag.get('datetime')
+                    parsed = _try_parse_time_value(dt_attr or time_tag.get_text(strip=True))
+                    if parsed:
+                        time_str = parsed
+                # Check common time-like classes/ids
+                if not time_str:
+                    candidate_time_elements = soup.find_all(class_=re.compile(r'time|start|scheduled', re.I))
+                    for el in candidate_time_elements:
+                        parsed = _try_parse_time_value(el.get('datetime') or el.get_text(" ", strip=True))
+                        if parsed:
+                            time_str = parsed
+                            break
+
+                # As a last resort, search the whole page text for the first HH:MM
+                if not time_str:
+                    whole_text = soup.get_text(" ", strip=True)
+                    m = re.search(r'\b([0-2]?[0-9]:[0-5][0-9])\b', whole_text)
+                    if m:
+                        time_str = m.group(1)
+                
+                # DEV debug when missing and DEBUG True
+                if not time_str and DEBUG:
+                    try:
+                        st.write("DEBUG: Could not find time in HTML. Page title:", page_title)
+                        st.write("DEBUG: Showing snippet:", whole_text[:2000])
+                    except Exception:
+                        pass
 
         runners = []
         horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name', re.I))
@@ -154,7 +229,7 @@ def parse_sporting_life_racecard(url):
                     if not any(x in clean_name.lower() for x in ['club', 'ltd', 'racing', 'stakes', 'maiden']):
                         runners.append({'horse': clean_name, 'odds': 'SP'})
 
-        meta = {'title': f"{course} {time_str}", 'course': course, 'race_time': time_str, 'active_runners': len(runners)}
+        meta = {'title': f"{course} {time_str}".strip(), 'course': course, 'race_time': time_str, 'active_runners': len(runners)}
         return meta, runners
 
     except Exception as e:
@@ -220,7 +295,8 @@ with tab1:
                 # Time Input Field for full manual control / quick adjustment
                 col_t1, col_t2 = st.columns([1, 2])
                 with col_t1:
-                    race_time_val = st.text_input(f"R{r_num} Time", value=meta.get('race_time', '14:00'), key=f"time_{r_num}")
+                    # Show empty string if no parsed time so users notice missing times
+                    race_time_val = st.text_input(f"R{r_num} Time", value=meta.get('race_time') or '', key=f"time_{r_num}")
                 with col_t2:
                     is_ew = meta.get('active_runners', 0) >= 8
                     if is_ew:
@@ -249,7 +325,8 @@ with tab1:
             for race_data in st.session_state['processed_races']:
                 r_num = race_data['race_num']
                 meta = race_data['meta']
-                r_time = st.session_state.get(f"time_{r_num}", meta.get('race_time'))
+                # prefer user-edited session value, fall back to parsed meta, else None
+                r_time = st.session_state.get(f"time_{r_num}") or meta.get('race_time') or None
                 p_val = st.session_state.get(f"p_{r_num}")
                 s_val = st.session_state.get(f"s_{r_num}")
                 c_val = st.session_state.get(f"c_{r_num}")
