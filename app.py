@@ -50,12 +50,12 @@ def parse_sporting_life_racecard(url):
     }
     
     try:
-        # 1. Fallback Time Extraction directly from URL (e.g., /1355/ or /13:55/)
+        # Extract Time directly from URL Path if available
         time_from_url = "00:00"
-        url_time_match = re.search(r'/(\d{2}:?\d{2})(?:/|\b)', url)
-        if url_time_match:
-            raw_t = url_time_match.group(1).replace(':', '')
-            if len(raw_t) == 4:
+        time_match = re.search(r'/(\d{2}:?\d{2})(?:/|\b)', url)
+        if time_match:
+            raw_t = time_match.group(1).replace(':', '')
+            if len(raw_t) == 4 and raw_t.isdigit():
                 time_from_url = f"{raw_t[:2]}:{raw_t[2:]}"
 
         race_id_match = re.search(r'/racecard/(\d+)', url)
@@ -70,7 +70,7 @@ def parse_sporting_life_racecard(url):
                 race_info = data.get('racecard', data)
                 course = race_info.get('course_name', race_info.get('meeting_name', 'Unknown'))
                 
-                # Fetch Time from API or fallback
+                # Fetch Time from API or fallback to URL match
                 time_str = race_info.get('time', race_info.get('race_time', time_from_url))
                 if time_str == "00:00" and time_from_url != "00:00":
                     time_str = time_from_url
@@ -112,7 +112,6 @@ def parse_sporting_life_racecard(url):
                 break
         
         time_str = time_from_url
-        # Search page text for 24hr race time pattern (e.g., 14:15)
         page_text = soup.get_text()
         found_time = re.search(r'\b([0-2][0-9]:[0-5][0-9])\b', page_text)
         if found_time and time_str == "00:00":
