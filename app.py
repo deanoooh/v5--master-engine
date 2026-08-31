@@ -30,7 +30,16 @@ def init_db():
 
 init_db()
 
-# Sporting Life Direct API / Targeted Scraper Function
+# Helper to clean horse names cleanly (stripping trailing numbers and gear suffix codes)
+def clean_horse_name(raw_name):
+    if not raw_name:
+        return ""
+    # Strip trailing numbers (days off) and trailing gear letters (p, v, h, b, e, t)
+    name = re.sub(r'\d+[a-zA-Z]?$', '', str(raw_name)).strip()
+    name = re.sub(r'\s+[pvhbet]$', '', name, flags=re.I).strip()
+    return name
+
+# Sporting Life Scraper Function
 def parse_sporting_life_racecard(url):
     if not url or not url.strip():
         return None, "Empty URL"
@@ -43,6 +52,14 @@ def parse_sporting_life_racecard(url):
     try:
         race_id_match = re.search(r'/racecard/(\d+)', url)
         
+        # Extract time from URL if present (e.g., /2026-08-31/ripon/1355/ or similar)
+        time_from_url = "00:00"
+        time_match = re.search(r'/(\d{2}:?\d{2})(/|\b)', url)
+        if time_match:
+            raw_t = time_match.group(1).replace(':', '')
+            if len(raw_t) == 4:
+                time_from_url = f"{raw_t[:2]}:{raw_t[2:]}"
+
         if race_id_match:
             race_id = race_id_match.group(1)
             api_url = f"https://www.sportinglife.com/api/ux/racing/racecards/{race_id}"
@@ -52,7 +69,7 @@ def parse_sporting_life_racecard(url):
                 data = api_res.json()
                 race_info = data.get('racecard', data)
                 course = race_info.get('course_name', 'Unknown')
-                time_str = race_info.get('time', '00:00')
+                time_str = race_info.get('time', time_from_url)
                 
                 runners = []
                 rides = race_info.get('rides', race_info.get('ride', []))
@@ -63,8 +80,10 @@ def parse_sporting_life_racecard(url):
                         raw_name = horse_obj.get('name') if isinstance(horse_obj, dict) else r.get('horse_name', r.get('name'))
                         
                         if raw_name:
-                            clean_name = re.sub(r'\d+$', '', str(raw_name)).strip()
+                            clean_name = clean_horse_name(raw_name)
                             odds = r.get('current_odds', r.get('sp_odds', 'SP'))
+                            if not odds or odds == '':
+                                odds = 'SP'
                             
                             if clean_name and clean_name not in [x['horse'] for x in runners]:
                                 runners.append({'horse': clean_name, 'odds': str(odds)})
@@ -77,22 +96,37 @@ def parse_sporting_life_racecard(url):
                 }
                 return meta, runners
 
+        # Fallback Scraper
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        course = url.split('/')[6].capitalize() if len(url.split('/')) > 6 else "Unknown"
-        runners = []
+        # Course parsing
+        parts = url.split('/')
+        course = "Unknown"
+        for idx, p in enumerate(parts):
+            if p == 'racecards' and idx + 2 < len(parts):
+                course = parts[idx + 2].capitalize()
+                break
         
+        # Time parsing from header
+        time_str = time_from_url
+        header_el = soup.find(class_=re.compile(r'Header|Title|RaceTime', re.I))
+        if header_el:
+            t_find = re.search(r'(\d{1,2}:\d{2})', header_el.get_text())
+            if t_find:
+                time_str = t_find.group(1)
+
+        runners = []
         horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name', re.I))
         for el in horse_elements:
             raw_text = el.get_text(strip=True)
             if raw_text and len(raw_text) > 2:
-                clean_name = re.sub(r'\d+$', '', raw_text).strip()
+                clean_name = clean_horse_name(raw_text)
                 if clean_name not in [x['horse'] for x in runners]:
                     if not any(x in clean_name.lower() for x in ['club', 'ltd', 'racing', 'stakes', 'maiden']):
                         runners.append({'horse': clean_name, 'odds': 'SP'})
 
-        meta = {'title': f"{course} Race", 'course': course, 'race_time': '00:00', 'active_runners': len(runners)}
+        meta = {'title': f"{course} {time_str}", 'course': course, 'race_time': time_str, 'active_runners': len(runners)}
         return meta, runners
 
     except Exception as e:
@@ -110,7 +144,7 @@ with tab1:
     col_a, col_b = st.columns(2)
     
     with col_a:
-        urls.append(st.text_input("Race 1 URL:", value="https://www.sportinglife.com/racing/racecards/2026-08-31/ripon/racecard/935815/squadron-flyer-at-aldwark-manor-estate-ebf-restricted-maiden-stakes-gbb-race", key="url1"))
+        urls.append(st.text_input("Race 1 URL:", key="url1"))
         urls.append(st.text_input("Race 2 URL:", key="url2"))
         urls.append(st.text_input("Race 3 URL:", key="url3"))
         urls.append(st.text_input("Race 4 URL:", key="url4"))
@@ -149,7 +183,9 @@ with tab1:
             r_num = race_data['race_num']
             meta = race_data['meta']
             runners = race_data['runners']
-            runner_names = [r['horse'] for r in runners]
+            
+            # Format runner choices with odds + Add NO BET option
+            formatted_choices = ["🔴 NO BET"] + [f"{r['horse']} ({r['odds']})" for r in runners]
             
             with st.expander(f"📍 Race {r_num}: {meta.get('course')} ({meta.get('race_time')}) — {meta.get('active_runners')} Runners", expanded=True):
                 
@@ -159,23 +195,19 @@ with tab1:
                 else:
                     st.warning("Field Size: ⚠️ Win-Only Enforced (< 8 Runners)")
 
-                if runner_names:
-                    # Auto-assign defaults per engine rules
-                    p_def = runner_names[7] if len(runner_names) > 7 and "Arenite" in runner_names[7] else runner_names[0]
-                    s_def = runner_names[5] if len(runner_names) > 5 and "Ouragan" in runner_names[5] else (runner_names[1] if len(runner_names) > 1 else runner_names[0])
-                    c_def = runner_names[6] if len(runner_names) > 6 and "Travellers Girl" in runner_names[6] else (runner_names[2] if len(runner_names) > 2 else runner_names[0])
-                    
-                    p_idx = runner_names.index(p_def) if p_def in runner_names else 0
-                    s_idx = runner_names.index(s_def) if s_def in runner_names else 0
-                    c_idx = runner_names.index(c_def) if c_def in runner_names else 0
+                if runners:
+                    # Default indices (Index 0 is NO BET, Index 1 is Top Runner, etc.)
+                    p_idx = 1 if len(formatted_choices) > 1 else 0
+                    s_idx = 2 if len(formatted_choices) > 2 else 0
+                    c_idx = 3 if len(formatted_choices) > 3 else 0
 
                     c1, c2, c3 = st.columns(3)
                     with c1:
-                        st.selectbox(f"R{r_num} PRIMARY", options=runner_names, index=p_idx, key=f"p_{r_num}")
+                        st.selectbox(f"R{r_num} PRIMARY", options=formatted_choices, index=p_idx, key=f"p_{r_num}")
                     with c2:
-                        st.selectbox(f"R{r_num} SECONDARY", options=runner_names, index=s_idx, key=f"s_{r_num}")
+                        st.selectbox(f"R{r_num} SECONDARY", options=formatted_choices, index=s_idx, key=f"s_{r_num}")
                     with c3:
-                        st.selectbox(f"R{r_num} CHAOS", options=runner_names, index=c_idx, key=f"c_{r_num}")
+                        st.selectbox(f"R{r_num} CHAOS", options=formatted_choices, index=c_idx, key=f"c_{r_num}")
                 else:
                     st.error("No active runners parsed for this race.")
 
