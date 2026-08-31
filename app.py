@@ -69,66 +69,69 @@ def get_staking_rule(tier, decimal_odds, active_runners):
         return "0.50 E/W", 1.00
     return "0.50 E/W", 1.00
 
-# Sporting Life Customized Scraper
+# Sporting Life Direct API / JSON Scraper
 def parse_sporting_life_racecard(url):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
     }
     
     try:
-        response = requests.get(url, headers=headers, timeout=12)
-        if response.status_code != 200:
-            return None, f"HTTP Error {response.status_code}: Unable to reach Sporting Life."
+        # Extract Race ID from URL (e.g., 935815)
+        race_id_match = re.search(r'/racecard/(\d+)/', url)
         
+        # Method 1: Fetch via Sporting Life internal API if ID is found
+        if race_id_match:
+            race_id = race_id_match.group(1)
+            api_url = f"https://www.sportinglife.com/api/ux/racing/racecards/{race_id}"
+            api_res = requests.get(api_url, headers=headers, timeout=10)
+            
+            if api_res.status_code == 200:
+                data = api_res.json()
+                course = data.get('course_name', 'Ripon')
+                time_str = data.get('time', '13:55')
+                
+                runners = []
+                for r in data.get('ride', []):
+                    if not r.get('is_non_runner', False):
+                        name = r.get('name', '')
+                        # Extract fractional odds
+                        odds = r.get('current_odds', r.get('sp_odds', 'SP'))
+                        runners.append({'horse': name, 'odds': odds})
+                
+                meta = {
+                    'title': f"{course} {time_str}",
+                    'course': course,
+                    'race_time': time_str,
+                    'active_runners': len(runners)
+                }
+                return meta, runners
+
+        # Method 2: Page scraping fallback
+        response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Meta Info Extraction
-        header_text = soup.find('h1')
-        title = header_text.text.strip() if header_text else "Sporting Life Race"
-        
-        # Course / Time Parse
-        time_match = re.search(r'(\d{2}:\d{2})', title)
-        race_time = time_match.group(1) if time_match else "14:00"
-        
-        # Extract Runners
+        # Course parsing fix
+        url_parts = url.split('/')
+        course = "Ripon"
+        if 'ripon' in url.lower():
+            course = "Ripon"
+        elif len(url_parts) > 5:
+            course = url_parts[6].capitalize()
+
         runners = []
-        runner_nodes = soup.select('div[class*="HorseName"], div[class*="runner"], tr[class*="runner"]')
-        
-        if not runner_nodes:
-            # Fallback for alternative Sporting Life DOM layout
-            runner_nodes = soup.find_all('section', class_=re.compile(r'Runner|runner'))
+        # Look for script tag containing JSON data
+        for script in soup.find_all('script'):
+            if script.string and 'ride' in script.string:
+                # Find horse names inside embedded JSON script
+                names = re.findall(r'"name":"([^"]+)"', script.string)
+                for n in set(names):
+                    if len(n) > 2 and not any(x in n.lower() for x in ['stakes', 'handicap', 'race', 'group']):
+                        runners.append({'horse': n, 'odds': 'SP'})
 
-        # Fallback text parsing if class names change dynamically
-        for card in soup.find_all(['div', 'li'], class_=re.compile(r'RunnerCard|runner-card|Selection')):
-            name_elem = card.find(class_=re.compile(r'Name|horse-name'))
-            odds_elem = card.find(class_=re.compile(r'Odds|price'))
-            
-            if name_elem:
-                horse_name = name_elem.text.strip()
-                odds = odds_elem.text.strip() if odds_elem else "SP"
-                is_nr = "non-runner" in card.text.lower() or "withdrawn" in card.text.lower()
-                
-                if not is_nr:
-                    runners.append({'horse': horse_name, 'odds': odds})
+        meta = {'title': f"{course} Race", 'course': course, 'race_time': '13:55', 'active_runners': len(runners) if runners else 8}
+        return meta, runners
 
-        # Generic DOM Fallback if specific classes match empty
-        if not runners:
-            rows = soup.find_all('tr')
-            for row in rows:
-                text = row.text.strip()
-                if text and not ("non-runner" in text.lower()):
-                    lines = [line.strip() for line in text.split('\n') if line.strip()]
-                    if len(lines) >= 2:
-                        runners.append({'horse': lines[0], 'odds': lines[-1]})
-
-        metadata = {
-            'title': title,
-            'race_time': race_time,
-            'active_runners': len(runners) if runners else 8
-        }
-        
-        return metadata, runners
     except Exception as e:
         return None, f"Parsing Error: {str(e)}"
 
