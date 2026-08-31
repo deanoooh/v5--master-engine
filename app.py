@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import sqlite3
+from datetime import datetime
 
 # Streamlit Page Config
 st.set_page_config(page_title="v5.26.4 Master Engine", page_icon="🏇", layout="wide")
@@ -30,7 +31,7 @@ def init_db():
 
 init_db()
 
-# Helper to clean horse names cleanly (stripping trailing numbers and gear suffix codes)
+# Helper to clean horse names (stripping trailing numbers and gear suffix codes)
 def clean_horse_name(raw_name):
     if not raw_name:
         return ""
@@ -39,7 +40,7 @@ def clean_horse_name(raw_name):
     name = re.sub(r'\s+[pvhbet]$', '', name, flags=re.I).strip()
     return name
 
-# Sporting Life Scraper Function with Reliable Time Extraction
+# Sporting Life Scraper Function
 def parse_sporting_life_racecard(url):
     if not url or not url.strip():
         return None, "Empty URL"
@@ -50,14 +51,6 @@ def parse_sporting_life_racecard(url):
     }
     
     try:
-        # Extract Time directly from URL Path if available
-        time_from_url = "00:00"
-        time_match = re.search(r'/(\d{2}:?\d{2})(?:/|\b)', url)
-        if time_match:
-            raw_t = time_match.group(1).replace(':', '')
-            if len(raw_t) == 4 and raw_t.isdigit():
-                time_from_url = f"{raw_t[:2]}:{raw_t[2:]}"
-
         race_id_match = re.search(r'/racecard/(\d+)', url)
         
         if race_id_match:
@@ -70,11 +63,20 @@ def parse_sporting_life_racecard(url):
                 race_info = data.get('racecard', data)
                 course = race_info.get('course_name', race_info.get('meeting_name', 'Unknown'))
                 
-                # Fetch Time from API or fallback to URL match
-                time_str = race_info.get('time', race_info.get('race_time', time_from_url))
-                if time_str == "00:00" and time_from_url != "00:00":
-                    time_str = time_from_url
+                # Extract time from API timestamp or field
+                time_str = ""
+                if 'time' in race_info and race_info['time']:
+                    time_str = str(race_info['time'])
+                elif 'timestamp' in race_info and race_info['timestamp']:
+                    try:
+                        ts = int(race_info['timestamp']) / 1000
+                        time_str = datetime.fromtimestamp(ts).strftime('%H:%M')
+                    except Exception:
+                        time_str = ""
                 
+                if not time_str:
+                    time_str = "14:00" # Sensible fallback
+
                 runners = []
                 rides = race_info.get('rides', race_info.get('ride', []))
                 for r in rides:
@@ -100,7 +102,7 @@ def parse_sporting_life_racecard(url):
                 }
                 return meta, runners
 
-        # 2. Fallback Page Scraper
+        # Fallback Page Scraper
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -111,11 +113,15 @@ def parse_sporting_life_racecard(url):
                 course = parts[idx + 2].capitalize()
                 break
         
-        time_str = time_from_url
-        page_text = soup.get_text()
-        found_time = re.search(r'\b([0-2][0-9]:[0-5][0-9])\b', page_text)
-        if found_time and time_str == "00:00":
-            time_str = found_time.group(1)
+        # Search page header specifically for race time (12-hour or 24-hour HH:MM format)
+        time_str = "14:00"
+        header_text = ""
+        header_el = soup.find(class_=re.compile(r'Header|Time|Title', re.I))
+        if header_el:
+            header_text = header_el.get_text()
+            found_time = re.search(r'\b(1[0-2]|0?[1-9]):([0-5][0-9])\s*(am|pm)?\b|\b([0-1][0-9]|2[0-3]):([0-5][0-9])\b', header_text, re.I)
+            if found_time:
+                time_str = found_time.group(0)
 
         runners = []
         horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name', re.I))
@@ -188,16 +194,20 @@ with tab1:
             # Format runner choices with odds + Add NO BET option
             formatted_choices = ["🔴 NO BET"] + [f"{r['horse']} ({r['odds']})" for r in runners]
             
-            with st.expander(f"📍 Race {r_num}: {meta.get('course')} ({meta.get('race_time')}) — {meta.get('active_runners')} Runners", expanded=True):
+            with st.expander(f"📍 Race {r_num}: {meta.get('course')} — {meta.get('active_runners')} Runners", expanded=True):
                 
-                is_ew = meta.get('active_runners', 0) >= 8
-                if is_ew:
-                    st.info("Field Size: ✅ Standard E/W Eligible (8+ Runners)")
-                else:
-                    st.warning("Field Size: ⚠️ Win-Only Enforced (< 8 Runners)")
+                # Time Input Field for full manual control / quick adjustment
+                col_t1, col_t2 = st.columns([1, 2])
+                with col_t1:
+                    race_time_val = st.text_input(f"R{r_num} Time", value=meta.get('race_time', '14:00'), key=f"time_{r_num}")
+                with col_t2:
+                    is_ew = meta.get('active_runners', 0) >= 8
+                    if is_ew:
+                        st.info("Field Size: ✅ Standard E/W Eligible (8+ Runners)")
+                    else:
+                        st.warning("Field Size: ⚠️ Win-Only Enforced (< 8 Runners)")
 
                 if runners:
-                    # Default indices (Index 0 is NO BET, Index 1 is Top Runner, etc.)
                     p_idx = 1 if len(formatted_choices) > 1 else 0
                     s_idx = 2 if len(formatted_choices) > 2 else 0
                     c_idx = 3 if len(formatted_choices) > 3 else 0
@@ -218,6 +228,7 @@ with tab1:
             for race_data in st.session_state['processed_races']:
                 r_num = race_data['race_num']
                 meta = race_data['meta']
+                r_time = st.session_state.get(f"time_{r_num}", meta.get('race_time'))
                 p_val = st.session_state.get(f"p_{r_num}")
                 s_val = st.session_state.get(f"s_{r_num}")
                 c_val = st.session_state.get(f"c_{r_num}")
@@ -225,7 +236,7 @@ with tab1:
                 c.execute('''
                     INSERT INTO race_selections (race_date, race_time, course, primary_horse, secondary_horse, chaos_horse, active_runners, ew_eligible)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', ('2026-08-31', meta.get('race_time'), meta.get('course'), p_val, s_val, c_val, meta.get('active_runners'), 1 if meta.get('active_runners', 0) >= 8 else 0))
+                ''', ('2026-08-31', r_time, meta.get('course'), p_val, s_val, c_val, meta.get('active_runners'), 1 if meta.get('active_runners', 0) >= 8 else 0))
             
             conn.commit()
             conn.close()
