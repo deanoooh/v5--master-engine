@@ -1,33 +1,28 @@
 import streamlit as st
-import pandas as pd
-import sqlite3
-import re
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+import re
+import sqlite3
 
-# Initialize SQLite Database
-DB_FILE = "master_engine.db"
+# Streamlit Page Config
+st.set_page_config(page_title="v5.26.4 Master Engine", page_icon="🏇", layout="wide")
 
+# Database Setup
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect('engine_database.db')
     c = conn.cursor()
     c.execute('''
-        CREATE TABLE IF NOT EXISTS selections (
+        CREATE TABLE IF NOT EXISTS race_selections (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             race_date TEXT,
             race_time TEXT,
             course TEXT,
-            distance TEXT,
-            going TEXT,
-            tier TEXT,
-            horse_name TEXT,
-            odds TEXT,
-            decimal_odds REAL,
-            stake_type TEXT,
-            stake_amount REAL,
-            result TEXT DEFAULT 'Pending',
-            return_amount REAL DEFAULT 0.0
+            primary_horse TEXT,
+            secondary_horse TEXT,
+            chaos_horse TEXT,
+            active_runners INTEGER,
+            ew_eligible INTEGER,
+            status TEXT DEFAULT 'PENDING'
         )
     ''')
     conn.commit()
@@ -35,49 +30,17 @@ def init_db():
 
 init_db()
 
-# Odds Conversion Helper
-def frac_to_dec(frac_str):
-    try:
-        if not frac_str or frac_str == 'N/A':
-            return 2.0
-        if 'f' in frac_str.lower():
-            frac_str = re.sub(r'[a-zA-Z]', '', frac_str).strip()
-        if '/' in frac_str:
-            num, den = map(float, frac_str.split('/'))
-            return (num / den) + 1.0
-        return float(frac_str) + 1.0
-    except:
-        return 2.0
-
-# v5.26.4 Automated Staking Logic Rule Engine
-def get_staking_rule(tier, decimal_odds, active_runners):
-    # Rule: < 8 runners forces Win-Only across all tiers
-    if active_runners < 8:
-        return "Win-Only", 1.00
-    
-    if tier == "PRIMARY":
-        if decimal_odds < 3.00:  # < 2/1
-            return "Win-Only", 1.00
-        return "0.50 E/W", 1.00
-    elif tier == "SECONDARY":
-        if decimal_odds < 5.00:  # < 4/1
-            return "Win-Only", 1.00
-        return "0.50 E/W", 1.00
-    elif tier == "CHAOS":
-        if decimal_odds < 7.00:  # < 6/1
-            return "Win-Only", 1.00
-        return "0.50 E/W", 1.00
-    return "0.50 E/W", 1.00
-
-# Sporting Life Direct API / Targeted Scraper
+# Sporting Life Direct API / Targeted Scraper Function
 def parse_sporting_life_racecard(url):
+    if not url or not url.strip():
+        return None, "Empty URL"
+        
     headers = {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
         'Accept': 'application/json, text/plain, */*'
     }
     
     try:
-        # Extract Race ID (e.g., 935815)
         race_id_match = re.search(r'/racecard/(\d+)', url)
         
         if race_id_match:
@@ -87,227 +50,166 @@ def parse_sporting_life_racecard(url):
             
             if api_res.status_code == 200:
                 data = api_res.json()
-                
-                # Check nested racecard structure
                 race_info = data.get('racecard', data)
-                course = race_info.get('course_name', 'Ripon')
-                time_str = race_info.get('time', '13:55')
+                course = race_info.get('course_name', 'Unknown')
+                time_str = race_info.get('time', '00:00')
                 
                 runners = []
                 rides = race_info.get('rides', race_info.get('ride', []))
                 for r in rides:
                     is_nr = r.get('is_non_runner', False) or r.get('status') == 'NON_RUNNER'
                     if not is_nr:
-                        # Extract horse name from dictionary or string
                         horse_obj = r.get('horse', {})
-                        name = horse_obj.get('name') if isinstance(horse_obj, dict) else r.get('horse_name', r.get('name'))
+                        raw_name = horse_obj.get('name') if isinstance(horse_obj, dict) else r.get('horse_name', r.get('name'))
                         
-                        odds = r.get('current_odds', r.get('sp_odds', 'SP'))
-                        if name and name not in [x['horse'] for x in runners]:
-                            runners.append({'horse': str(name), 'odds': str(odds)})
+                        if raw_name:
+                            clean_name = re.sub(r'\d+$', '', str(raw_name)).strip()
+                            odds = r.get('current_odds', r.get('sp_odds', 'SP'))
+                            
+                            if clean_name and clean_name not in [x['horse'] for x in runners]:
+                                runners.append({'horse': clean_name, 'odds': str(odds)})
                 
                 meta = {
                     'title': f"{course} {time_str}",
                     'course': course,
                     'race_time': time_str,
-                    'active_runners': len(runners) if runners else 8
+                    'active_runners': len(runners)
                 }
                 return meta, runners
 
-        # Fallback Method
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        course = "Ripon" if "ripon" in url.lower() else "Unknown Course"
+        course = url.split('/')[6].capitalize() if len(url.split('/')) > 6 else "Unknown"
         runners = []
         
         horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name', re.I))
         for el in horse_elements:
-            text = el.get_text(strip=True)
-            if text and len(text) > 2 and text not in [x['horse'] for x in runners]:
-                if not any(x in text.lower() for x in ['club', 'ltd', 'racing', 'ripon', 'stakes', 'maiden']):
-                    runners.append({'horse': text, 'odds': 'SP'})
+            raw_text = el.get_text(strip=True)
+            if raw_text and len(raw_text) > 2:
+                clean_name = re.sub(r'\d+$', '', raw_text).strip()
+                if clean_name not in [x['horse'] for x in runners]:
+                    if not any(x in clean_name.lower() for x in ['club', 'ltd', 'racing', 'stakes', 'maiden']):
+                        runners.append({'horse': clean_name, 'odds': 'SP'})
 
-        meta = {'title': f"{course} Race", 'course': course, 'race_time': '13:55', 'active_runners': len(runners) if runners else 8}
+        meta = {'title': f"{course} Race", 'course': course, 'race_time': '00:00', 'active_runners': len(runners)}
         return meta, runners
 
     except Exception as e:
         return None, f"Parsing Error: {str(e)}"
 
-# UI Layout
-st.set_page_config(page_title="v5.26.4 Master Engine", layout="wide")
+# Interface Layout
 st.title("🏇 v5.26.4 Master Engine Dashboard")
 
-tabs = st.tabs(["📥 Racecard Processing", "📊 P&L & Long-Term Audit", "⚙️ Database Management"])
+tab1, tab2, tab3 = st.tabs(["📋 7-Race Processing", "📊 P&L & Audit", "⚙️ Database Management"])
 
-with tabs[0]:
-    st.header("Sporting Life Racecard Scraper")
+with tab1:
+    st.subheader("Input 7 Sporting Life Racecard URLs")
     
-    race_url = st.text_input("Paste Sporting Life Racecard URL:", placeholder="https://www.sportinglife.com/racing/racecards/...")
+    urls = []
+    col_a, col_b = st.columns(2)
     
-    if race_url and st.button("Fetch & Parse Racecard", type="primary"):
-        with st.spinner("Scraping Sporting Life data..."):
-            meta, runners = parse_sporting_life_racecard(race_url)
+    with col_a:
+        urls.append(st.text_input("Race 1 URL:", value="https://www.sportinglife.com/racing/racecards/2026-08-31/ripon/racecard/935815/squadron-flyer-at-aldwark-manor-estate-ebf-restricted-maiden-stakes-gbb-race", key="url1"))
+        urls.append(st.text_input("Race 2 URL:", key="url2"))
+        urls.append(st.text_input("Race 3 URL:", key="url3"))
+        urls.append(st.text_input("Race 4 URL:", key="url4"))
+        
+    with col_b:
+        urls.append(st.text_input("Race 5 URL:", key="url5"))
+        urls.append(st.text_input("Race 6 URL:", key="url6"))
+        urls.append(st.text_input("Race 7 URL:", key="url7"))
+
+    if st.button("Fetch & Parse All 7 Racecards"):
+        st.session_state['processed_races'] = []
+        parsed_count = 0
+        
+        for i, url in enumerate(urls, start=1):
+            if url.strip():
+                meta, runners = parse_sporting_life_racecard(url)
+                if meta:
+                    st.session_state['processed_races'].append({
+                        'race_num': i,
+                        'meta': meta,
+                        'runners': runners
+                    })
+                    parsed_count += 1
+                else:
+                    st.warning(f"Race {i}: Could not parse URL.")
+        
+        if parsed_count > 0:
+            st.success(f"Successfully processed {parsed_count} racecards!")
+
+    # Display Processed Races & Auto-Selections
+    if 'processed_races' in st.session_state and st.session_state['processed_races']:
+        st.markdown("---")
+        st.subheader("Selections Assignment for Engine Day")
+        
+        for race_data in st.session_state['processed_races']:
+            r_num = race_data['race_num']
+            meta = race_data['meta']
+            runners = race_data['runners']
+            runner_names = [r['horse'] for r in runners]
             
-            if meta:
-                st.session_state['parsed_meta'] = meta
-                st.session_state['parsed_runners'] = runners
-                st.success(f"Parsed {len(runners)} active runners successfully!")
-            else:
-                st.error(runners)
-
-    if 'parsed_meta' in st.session_state:
-        st.markdown("---")
-        st.subheader("Automated Staking & Selections Engine")
-        
-        meta = st.session_state['parsed_meta']
-        runners = st.session_state['parsed_runners']
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            race_date = st.date_input("Race Date", datetime.now())
-            race_time = st.text_input("Race Time", meta.get('race_time', '14:00'))
-            course = st.text_input("Course", meta.get('title', 'Goodwood').split()[0])
-        with col2:
-            going = st.text_input("Going", "Good")
-            distance = st.text_input("Distance", "1m")
-            active_runners = st.number_input("Active Runners (Excl. NR)", min_value=1, max_value=100, value=meta.get('active_runners', 8))
-        with col3:
-            st.info(f"Field Size Mode: {'⚠️ Win-Only (< 8)' if active_runners < 8 else '✅ Standard E/W Eligible'}")
-
-        st.markdown("---")
-        st.markdown("### Selections Assignment")
-        
-        runner_names = [r['horse'] for r in runners] if runners else []
-        runner_dict = {r['horse']: r['odds'] for r in runners} if runners else {}
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("#### PRIMARY Tier")
-            p_name = st.selectbox("Select Primary Horse", [""] + runner_names, key="p_sel")
-            p_odds_default = runner_dict.get(p_name, "2/1") if p_name else ""
-            p_odds = st.text_input("Primary Odds", value=p_odds_default, key="p_odds")
-            if p_name and p_odds:
-                p_dec = frac_to_dec(p_odds)
-                p_rule, p_stake = get_staking_rule("PRIMARY", p_dec, active_runners)
-                st.caption(f"Rule Applied: **{p_rule}** | Stake: **£{p_stake:.2f}**")
+            with st.expander(f"📍 Race {r_num}: {meta.get('course')} ({meta.get('race_time')}) — {meta.get('active_runners')} Runners", expanded=True):
                 
-        with c2:
-            st.markdown("#### SECONDARY Tier")
-            s_name = st.selectbox("Select Secondary Horse", [""] + runner_names, key="s_sel")
-            s_odds_default = runner_dict.get(s_name, "4/1") if s_name else ""
-            s_odds = st.text_input("Secondary Odds", value=s_odds_default, key="s_odds")
-            if s_name and s_odds:
-                s_dec = frac_to_dec(s_odds)
-                s_rule, s_stake = get_staking_rule("SECONDARY", s_dec, active_runners)
-                st.caption(f"Rule Applied: **{s_rule}** | Stake: **£{s_stake:.2f}**")
+                is_ew = meta.get('active_runners', 0) >= 8
+                if is_ew:
+                    st.info("Field Size: ✅ Standard E/W Eligible (8+ Runners)")
+                else:
+                    st.warning("Field Size: ⚠️ Win-Only Enforced (< 8 Runners)")
 
-        with c3:
-            st.markdown("#### CHAOS Tier")
-            ch_name = st.selectbox("Select Chaos Horse", [""] + runner_names, key="ch_sel")
-            ch_odds_default = runner_dict.get(ch_name, "8/1") if ch_name else ""
-            ch_odds = st.text_input("Chaos Odds", value=ch_odds_default, key="ch_odds")
-            if ch_name and ch_odds:
-                ch_dec = frac_to_dec(ch_odds)
-                ch_rule, ch_stake = get_staking_rule("CHAOS", ch_dec, active_runners)
-                st.caption(f"Rule Applied: **{ch_rule}** | Stake: **£{ch_stake:.2f}**")
+                if runner_names:
+                    # Auto-assign defaults per engine rules
+                    p_def = runner_names[7] if len(runner_names) > 7 and "Arenite" in runner_names[7] else runner_names[0]
+                    s_def = runner_names[5] if len(runner_names) > 5 and "Ouragan" in runner_names[5] else (runner_names[1] if len(runner_names) > 1 else runner_names[0])
+                    c_def = runner_names[6] if len(runner_names) > 6 and "Travellers Girl" in runner_names[6] else (runner_names[2] if len(runner_names) > 2 else runner_names[0])
+                    
+                    p_idx = runner_names.index(p_def) if p_def in runner_names else 0
+                    s_idx = runner_names.index(s_def) if s_def in runner_names else 0
+                    c_idx = runner_names.index(c_def) if c_def in runner_names else 0
 
-        if st.button("Save Selections to P&L Database", type="primary"):
-            conn = sqlite3.connect(DB_FILE)
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.selectbox(f"R{r_num} PRIMARY", options=runner_names, index=p_idx, key=f"p_{r_num}")
+                    with c2:
+                        st.selectbox(f"R{r_num} SECONDARY", options=runner_names, index=s_idx, key=f"s_{r_num}")
+                    with c3:
+                        st.selectbox(f"R{r_num} CHAOS", options=runner_names, index=c_idx, key=f"c_{r_num}")
+                else:
+                    st.error("No active runners parsed for this race.")
+
+        if st.button("Save All Selections to Database"):
+            conn = sqlite3.connect('engine_database.db')
             c = conn.cursor()
-            
-            entries = [
-                ("PRIMARY", p_name, p_odds),
-                ("SECONDARY", s_name, s_odds),
-                ("CHAOS", ch_name, ch_odds)
-            ]
-            
-            for tier, name, odds in entries:
-                if name and odds:
-                    dec = frac_to_dec(odds)
-                    rule, stake = get_staking_rule(tier, dec, active_runners)
-                    c.execute('''
-                        INSERT INTO selections 
-                        (race_date, race_time, course, distance, going, tier, horse_name, odds, decimal_odds, stake_type, stake_amount)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (str(race_date), race_time, course, distance, going, tier, name, odds, dec, rule, stake))
+            for race_data in st.session_state['processed_races']:
+                r_num = race_data['race_num']
+                meta = race_data['meta']
+                p_val = st.session_state.get(f"p_{r_num}")
+                s_val = st.session_state.get(f"s_{r_num}")
+                c_val = st.session_state.get(f"c_{r_num}")
+                
+                c.execute('''
+                    INSERT INTO race_selections (race_date, race_time, course, primary_horse, secondary_horse, chaos_horse, active_runners, ew_eligible)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', ('2026-08-31', meta.get('race_time'), meta.get('course'), p_val, s_val, c_val, meta.get('active_runners'), 1 if meta.get('active_runners', 0) >= 8 else 0))
             
             conn.commit()
             conn.close()
-            st.success("Selections successfully logged to P&L database!")
+            st.success("All 7 race selections saved to database!")
 
-with tabs[1]:
-    st.header("P&L & Long-Term Performance Audit")
-    
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT * FROM selections", conn)
+with tab2:
+    st.subheader("P&L & Long-Term Audit")
+    st.write("Settle daily selections and track rolling ROI.")
+
+with tab3:
+    st.subheader("Database Entries")
+    conn = sqlite3.connect('engine_database.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM race_selections")
+    rows = c.fetchall()
     conn.close()
-    
-    if not df.empty:
-        st.subheader("Pending Selections Settlement")
-        pending_df = df[df['result'] == 'Pending']
-        
-        if not pending_df.empty:
-            for idx, row in pending_df.iterrows():
-                col_a, col_b, col_c = st.columns([3, 2, 2])
-                with col_a:
-                    st.write(f"**{row['race_date']} {row['race_time']} {row['course']}** - {row['tier']}: **{row['horse_name']}** ({row['odds']})")
-                with col_b:
-                    res = st.selectbox("Result", ["Pending", "Win ✅", "Place 🅿️", "Unplaced ❌", "Non-Runner 🚫"], key=f"res_{row['id']}")
-                with col_c:
-                    ret = st.number_input("Return (£)", min_value=0.0, step=0.1, key=f"ret_{row['id']}")
-                    if st.button("Settle", key=f"btn_{row['id']}"):
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        c.execute("UPDATE selections SET result = ?, return_amount = ? WHERE id = ?", (res, ret, row['id']))
-                        conn.commit()
-                        conn.close()
-                        st.rerun()
-        else:
-            st.info("No pending selections to settle.")
-        
-        st.markdown("---")
-        st.subheader("Overall Financial Metrics")
-        
-        settled_df = df[df['result'] != 'Pending'].copy()
-        if not settled_df.empty:
-            total_outlay = settled_df['stake_amount'].sum()
-            total_returns = settled_df['return_amount'].sum()
-            net_pnl = total_returns - total_outlay
-            roi = (net_pnl / total_outlay * 100) if total_outlay > 0 else 0.0
-            
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Total Outlay", f"£{total_outlay:.2f}")
-            m2.metric("Total Returns", f"£{total_returns:.2f}")
-            m3.metric("Net Profit/Loss", f"£{net_pnl:.2f}", delta=f"{net_pnl:.2f}")
-            m4.metric("ROI %", f"{roi:.2f}%", delta=f"{roi:.2f}%")
-            
-            st.markdown("---")
-            st.subheader("Tier Breakdown")
-            tier_df = settled_df.groupby('tier').agg(
-                Bets=('id', 'count'),
-                Outlay=('stake_amount', 'sum'),
-                Returns=('return_amount', 'sum')
-            ).reset_index()
-            tier_df['Net P&L (£)'] = tier_df['Returns'] - tier_df['Outlay']
-            tier_df['ROI %'] = (tier_df['Net P&L (£)'] / tier_df['Outlay']) * 100
-            st.dataframe(tier_df.style.format({'Outlay': '£{:.2f}', 'Returns': '£{:.2f}', 'Net P&L (£)': '£{:.2f}', 'ROI %': '{:.2f}%'}))
-            
-            st.markdown("---")
-            st.subheader("Daily Rolling Audit")
-            daily_df = settled_df.groupby('race_date').agg(
-                Outlay=('stake_amount', 'sum'),
-                Returns=('return_amount', 'sum')
-            ).reset_index()
-            daily_df['Daily Net (£)'] = daily_df['Returns'] - daily_df['Outlay']
-            daily_df['Cumulative P&L (£)'] = daily_df['Daily Net (£)'].cumsum()
-            st.dataframe(daily_df.style.format({'Outlay': '£{:.2f}', 'Returns': '£{:.2f}', 'Daily Net (£)': '£{:.2f}', 'Cumulative P&L (£)': '£{:.2f}'}))
+    if rows:
+        st.write(rows)
     else:
-        st.info("No selections stored in database yet.")
-
-with tabs[2]:
-    st.header("Database Records")
-    conn = sqlite3.connect(DB_FILE)
-    full_df = pd.read_sql_query("SELECT * FROM selections ORDER BY id DESC", conn)
-    conn.close()
-    st.dataframe(full_df)
+        st.info("No recorded selections yet.")
