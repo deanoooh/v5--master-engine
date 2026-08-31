@@ -69,7 +69,7 @@ def get_staking_rule(tier, decimal_odds, active_runners):
         return "0.50 E/W", 1.00
     return "0.50 E/W", 1.00
 
-# Sporting Life Direct API / JSON Scraper
+# Sporting Life Direct API / Targeted Scraper
 def parse_sporting_life_racecard(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
@@ -77,7 +77,7 @@ def parse_sporting_life_racecard(url):
     }
     
     try:
-        # Extract Race ID from URL (e.g. 935815)
+        # Extract Race ID (e.g. 935815)
         race_id_match = re.search(r'/racecard/(\d+)', url)
         
         if race_id_match:
@@ -93,11 +93,16 @@ def parse_sporting_life_racecard(url):
                 runners = []
                 rides = data.get('rides', data.get('ride', []))
                 for r in rides:
+                    # Check for non-runners
                     is_nr = r.get('is_non_runner', False) or r.get('status') == 'NON_RUNNER'
                     if not is_nr:
-                        name = r.get('horse_name', r.get('name', ''))
+                        # Get exact horse name
+                        horse_obj = r.get('horse', {})
+                        name = horse_obj.get('name') if isinstance(horse_obj, dict) else r.get('horse_name', r.get('name'))
+                        
+                        # Get odds
                         odds = r.get('current_odds', r.get('sp_odds', 'SP'))
-                        if name:
+                        if name and name not in [x['horse'] for x in runners]:
                             runners.append({'horse': name, 'odds': odds})
                 
                 meta = {
@@ -108,25 +113,22 @@ def parse_sporting_life_racecard(url):
                 }
                 return meta, runners
 
-        # Fallback parsing
+        # Method 2: HTML BeautifulSoup exact runner extraction
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
         course = "Ripon" if "ripon" in url.lower() else "Unknown Course"
         runners = []
         
-        for script in soup.find_all('script'):
-            if script.string and 'ride' in script.string:
-                names = re.findall(r'"horse_name":"([^"]+)"', script.string)
-                if not names:
-                    names = re.findall(r'"name":"([^"]+)"', script.string)
-                for n in names:
-                    if len(n) > 2 and not any(x in n.lower() for x in ['stakes', 'handicap', 'race', 'group', 'class', 'ebf']):
-                        if n not in [x['horse'] for x in runners]:
-                            runners.append({'horse': n, 'odds': 'SP'})
-                            
-        # Cap runners list length for safety
-        runners = runners[:30]
+        # Target only the horse name elements in the DOM
+        horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name|name', re.I))
+        for el in horse_elements:
+            text = el.get_text(strip=True)
+            if text and len(text) > 2 and text not in [x['horse'] for x in runners]:
+                # Exclude trainers/jockeys/course names
+                if not any(k in text.lower() for x in ['club', 'ltd', 'racing', 'ripon', 'stakes', 'maiden']):
+                    runners.append({'horse': text, 'odds': 'SP'})
+
         meta = {'title': f"{course} Race", 'course': course, 'race_time': '13:55', 'active_runners': len(runners) if runners else 8}
         return meta, runners
 
