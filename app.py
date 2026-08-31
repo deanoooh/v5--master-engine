@@ -77,10 +77,9 @@ def parse_sporting_life_racecard(url):
     }
     
     try:
-        # Extract Race ID from URL (e.g., 935815)
-        race_id_match = re.search(r'/racecard/(\d+)/', url)
+        # Extract Race ID from URL (e.g. 935815)
+        race_id_match = re.search(r'/racecard/(\d+)', url)
         
-        # Method 1: Fetch via Sporting Life internal API if ID is found
         if race_id_match:
             race_id = race_id_match.group(1)
             api_url = f"https://www.sportinglife.com/api/ux/racing/racecards/{race_id}"
@@ -92,43 +91,42 @@ def parse_sporting_life_racecard(url):
                 time_str = data.get('time', '13:55')
                 
                 runners = []
-                for r in data.get('ride', []):
-                    if not r.get('is_non_runner', False):
-                        name = r.get('name', '')
-                        # Extract fractional odds
+                rides = data.get('rides', data.get('ride', []))
+                for r in rides:
+                    is_nr = r.get('is_non_runner', False) or r.get('status') == 'NON_RUNNER'
+                    if not is_nr:
+                        name = r.get('horse_name', r.get('name', ''))
                         odds = r.get('current_odds', r.get('sp_odds', 'SP'))
-                        runners.append({'horse': name, 'odds': odds})
+                        if name:
+                            runners.append({'horse': name, 'odds': odds})
                 
                 meta = {
                     'title': f"{course} {time_str}",
                     'course': course,
                     'race_time': time_str,
-                    'active_runners': len(runners)
+                    'active_runners': len(runners) if runners else 8
                 }
                 return meta, runners
 
-        # Method 2: Page scraping fallback
+        # Fallback parsing
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Course parsing fix
-        url_parts = url.split('/')
-        course = "Ripon"
-        if 'ripon' in url.lower():
-            course = "Ripon"
-        elif len(url_parts) > 5:
-            course = url_parts[6].capitalize()
-
+        course = "Ripon" if "ripon" in url.lower() else "Unknown Course"
         runners = []
-        # Look for script tag containing JSON data
+        
         for script in soup.find_all('script'):
             if script.string and 'ride' in script.string:
-                # Find horse names inside embedded JSON script
-                names = re.findall(r'"name":"([^"]+)"', script.string)
-                for n in set(names):
-                    if len(n) > 2 and not any(x in n.lower() for x in ['stakes', 'handicap', 'race', 'group']):
-                        runners.append({'horse': n, 'odds': 'SP'})
-
+                names = re.findall(r'"horse_name":"([^"]+)"', script.string)
+                if not names:
+                    names = re.findall(r'"name":"([^"]+)"', script.string)
+                for n in names:
+                    if len(n) > 2 and not any(x in n.lower() for x in ['stakes', 'handicap', 'race', 'group', 'class', 'ebf']):
+                        if n not in [x['horse'] for x in runners]:
+                            runners.append({'horse': n, 'odds': 'SP'})
+                            
+        # Cap runners list length for safety
+        runners = runners[:30]
         meta = {'title': f"{course} Race", 'course': course, 'race_time': '13:55', 'active_runners': len(runners) if runners else 8}
         return meta, runners
 
@@ -172,7 +170,7 @@ with tabs[0]:
         with col2:
             going = st.text_input("Going", "Good")
             distance = st.text_input("Distance", "1m")
-            active_runners = st.number_input("Active Runners (Excl. NR)", min_value=1, max_value=40, value=meta.get('active_runners', 8))
+            active_runners = st.number_input("Active Runners (Excl. NR)", min_value=1, max_value=100, value=meta.get('active_runners', 8))
         with col3:
             st.info(f"Field Size Mode: {'⚠️ Win-Only (< 8)' if active_runners < 8 else '✅ Standard E/W Eligible'}")
 
