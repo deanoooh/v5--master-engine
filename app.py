@@ -73,11 +73,11 @@ def get_staking_rule(tier, decimal_odds, active_runners):
 def parse_sporting_life_racecard(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        'Accept': 'application/json, text/plain, */*'
     }
     
     try:
-        # Extract Race ID (e.g. 935815)
+        # Extract Race ID (e.g., 935815)
         race_id_match = re.search(r'/racecard/(\d+)', url)
         
         if race_id_match:
@@ -87,23 +87,24 @@ def parse_sporting_life_racecard(url):
             
             if api_res.status_code == 200:
                 data = api_res.json()
-                course = data.get('course_name', 'Ripon')
-                time_str = data.get('time', '13:55')
+                
+                # Check nested racecard structure
+                race_info = data.get('racecard', data)
+                course = race_info.get('course_name', 'Ripon')
+                time_str = race_info.get('time', '13:55')
                 
                 runners = []
-                rides = data.get('rides', data.get('ride', []))
+                rides = race_info.get('rides', race_info.get('ride', []))
                 for r in rides:
-                    # Check for non-runners
                     is_nr = r.get('is_non_runner', False) or r.get('status') == 'NON_RUNNER'
                     if not is_nr:
-                        # Get exact horse name
+                        # Extract horse name from dictionary or string
                         horse_obj = r.get('horse', {})
                         name = horse_obj.get('name') if isinstance(horse_obj, dict) else r.get('horse_name', r.get('name'))
                         
-                        # Get odds
                         odds = r.get('current_odds', r.get('sp_odds', 'SP'))
                         if name and name not in [x['horse'] for x in runners]:
-                            runners.append({'horse': name, 'odds': odds})
+                            runners.append({'horse': str(name), 'odds': str(odds)})
                 
                 meta = {
                     'title': f"{course} {time_str}",
@@ -113,20 +114,18 @@ def parse_sporting_life_racecard(url):
                 }
                 return meta, runners
 
-        # Method 2: HTML BeautifulSoup exact runner extraction
-        response = requests.get(url, headers=headers, timeout=10)
+        # Fallback Method
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
         course = "Ripon" if "ripon" in url.lower() else "Unknown Course"
         runners = []
         
-        # Target only the horse name elements in the DOM
-        horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name|name', re.I))
+        horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name', re.I))
         for el in horse_elements:
             text = el.get_text(strip=True)
             if text and len(text) > 2 and text not in [x['horse'] for x in runners]:
-                # Exclude trainers/jockeys/course names
-                if not any(k in text.lower() for x in ['club', 'ltd', 'racing', 'ripon', 'stakes', 'maiden']):
+                if not any(x in text.lower() for x in ['club', 'ltd', 'racing', 'ripon', 'stakes', 'maiden']):
                     runners.append({'horse': text, 'odds': 'SP'})
 
         meta = {'title': f"{course} Race", 'course': course, 'race_time': '13:55', 'active_runners': len(runners) if runners else 8}
