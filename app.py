@@ -39,7 +39,7 @@ def clean_horse_name(raw_name):
     name = re.sub(r'\s+[pvhbet]$', '', name, flags=re.I).strip()
     return name
 
-# Sporting Life Scraper Function
+# Sporting Life Scraper Function with Reliable Time Extraction
 def parse_sporting_life_racecard(url):
     if not url or not url.strip():
         return None, "Empty URL"
@@ -50,16 +50,16 @@ def parse_sporting_life_racecard(url):
     }
     
     try:
-        race_id_match = re.search(r'/racecard/(\d+)', url)
-        
-        # Extract time from URL if present (e.g., /2026-08-31/ripon/1355/ or similar)
+        # 1. Fallback Time Extraction directly from URL (e.g., /1355/ or /13:55/)
         time_from_url = "00:00"
-        time_match = re.search(r'/(\d{2}:?\d{2})(/|\b)', url)
-        if time_match:
-            raw_t = time_match.group(1).replace(':', '')
+        url_time_match = re.search(r'/(\d{2}:?\d{2})(?:/|\b)', url)
+        if url_time_match:
+            raw_t = url_time_match.group(1).replace(':', '')
             if len(raw_t) == 4:
                 time_from_url = f"{raw_t[:2]}:{raw_t[2:]}"
 
+        race_id_match = re.search(r'/racecard/(\d+)', url)
+        
         if race_id_match:
             race_id = race_id_match.group(1)
             api_url = f"https://www.sportinglife.com/api/ux/racing/racecards/{race_id}"
@@ -68,8 +68,12 @@ def parse_sporting_life_racecard(url):
             if api_res.status_code == 200:
                 data = api_res.json()
                 race_info = data.get('racecard', data)
-                course = race_info.get('course_name', 'Unknown')
-                time_str = race_info.get('time', time_from_url)
+                course = race_info.get('course_name', race_info.get('meeting_name', 'Unknown'))
+                
+                # Fetch Time from API or fallback
+                time_str = race_info.get('time', race_info.get('race_time', time_from_url))
+                if time_str == "00:00" and time_from_url != "00:00":
+                    time_str = time_from_url
                 
                 runners = []
                 rides = race_info.get('rides', race_info.get('ride', []))
@@ -96,11 +100,10 @@ def parse_sporting_life_racecard(url):
                 }
                 return meta, runners
 
-        # Fallback Scraper
+        # 2. Fallback Page Scraper
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Course parsing
         parts = url.split('/')
         course = "Unknown"
         for idx, p in enumerate(parts):
@@ -108,13 +111,12 @@ def parse_sporting_life_racecard(url):
                 course = parts[idx + 2].capitalize()
                 break
         
-        # Time parsing from header
         time_str = time_from_url
-        header_el = soup.find(class_=re.compile(r'Header|Title|RaceTime', re.I))
-        if header_el:
-            t_find = re.search(r'(\d{1,2}:\d{2})', header_el.get_text())
-            if t_find:
-                time_str = t_find.group(1)
+        # Search page text for 24hr race time pattern (e.g., 14:15)
+        page_text = soup.get_text()
+        found_time = re.search(r'\b([0-2][0-9]:[0-5][0-9])\b', page_text)
+        if found_time and time_str == "00:00":
+            time_str = found_time.group(1)
 
         runners = []
         horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name', re.I))
