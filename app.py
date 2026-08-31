@@ -39,8 +39,7 @@ def clean_horse_name(raw_name):
     name = re.sub(r'\d+[a-zA-Z]?$', '', str(raw_name)).strip()
     name = re.sub(r'\s+[pvhbet]$', '', name, flags=re.I).strip()
     return name
-
-# Sporting Life Scraper Function (Updated Time Parsing)
+# Sporting Life Scraper Function with Bulletproof Time Extraction
 def parse_sporting_life_racecard(url):
     if not url or not url.strip():
         return None, "Empty URL"
@@ -52,6 +51,7 @@ def parse_sporting_life_racecard(url):
     
     try:
         race_id_match = re.search(r'/racecard/(\d+)', url)
+        time_str = ""
         
         if race_id_match:
             race_id = race_id_match.group(1)
@@ -60,37 +60,25 @@ def parse_sporting_life_racecard(url):
             
             if api_res.status_code == 200:
                 data = api_res.json()
+                # Check nested racecard / race objects
                 race_info = data.get('racecard', data)
+                if isinstance(race_info, dict) and 'race' in race_info:
+                    race_info = race_info['race']
+                    
                 course = race_info.get('course_name', race_info.get('meeting_name', 'Unknown'))
                 
-                # --- ACCURATE TIME EXTRACTION ---
-                time_str = ""
-                # Check direct time property
-                if race_info.get('time'):
-                    time_str = str(race_info['time']).strip()
-                # Check ISO datetime string (e.g. "2026-08-31T15:30:00.000Z")
-                elif race_info.get('date'):
-                    date_val = str(race_info['date'])
-                    time_match = re.search(r'T(\d{2}:\d{2})', date_val)
-                    if time_match:
-                        time_str = time_match.group(1)
-                # Check epoch timestamp
-                elif race_info.get('time_stamp') or race_info.get('timestamp'):
-                    ts_val = race_info.get('time_stamp') or race_info.get('timestamp')
-                    try:
-                        ts = int(ts_val) / (1000 if int(ts_val) > 1e11 else 1)
-                        time_str = datetime.fromtimestamp(ts).strftime('%H:%M')
-                    except Exception:
-                        time_str = ""
-
-                # Fallback: Extract HH:MM from URL slug if API time field is omitted
-                if not time_str or len(time_str) != 5:
-                    url_time = re.search(r'/(\d{2}\d{2})/', url)
-                    if url_time:
-                        raw_t = url_time.group(1)
-                        time_str = f"{raw_t[:2]}:{raw_t[2:]}"
-                    else:
-                        time_str = "14:00"
+                # Search all API time keys
+                raw_time = race_info.get('time') or race_info.get('race_time') or race_info.get('time_str')
+                if raw_time:
+                    t_match = re.search(r'\b([0-2]?[0-9]:[0-5][0-9])\b', str(raw_time))
+                    if t_match:
+                        time_str = t_match.group(1)
+                
+                # Fallback: check ISO timestamp or race title strings
+                if not time_str and race_info.get('date'):
+                    t_match = re.search(r'T(\d{2}:\d{2})', str(race_info['date']))
+                    if t_match:
+                        time_str = t_match.group(1)
 
                 runners = []
                 rides = race_info.get('rides', race_info.get('ride', []))
@@ -109,15 +97,16 @@ def parse_sporting_life_racecard(url):
                             if clean_name and clean_name not in [x['horse'] for x in runners]:
                                 runners.append({'horse': clean_name, 'odds': str(odds)})
                 
-                meta = {
-                    'title': f"{course} {time_str}",
-                    'course': course,
-                    'race_time': time_str,
-                    'active_runners': len(runners)
-                }
-                return meta, runners
+                if time_str:
+                    meta = {
+                        'title': f"{course} {time_str}",
+                        'course': course,
+                        'race_time': time_str,
+                        'active_runners': len(runners)
+                    }
+                    return meta, runners
 
-        # Fallback Page Scraper
+        # 2. Page HTML Parser (Searches page title and headings for HH:MM format)
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -128,12 +117,19 @@ def parse_sporting_life_racecard(url):
                 course = parts[idx + 2].capitalize()
                 break
         
-        time_str = "14:00"
-        header_el = soup.find(class_=re.compile(r'Header|Time|Title', re.I))
-        if header_el:
-            found_time = re.search(r'\b([0-1]?[0-9]|2[0-3]):([0-5][0-9])\b', header_el.get_text())
-            if found_time:
-                time_str = found_time.group(0)
+        # Search page title tag for race time (e.g. "14:15 Ripon...")
+        page_title = soup.title.string if soup.title else ""
+        time_match = re.search(r'\b([0-2]?[0-9]:[0-5][0-9])\b', page_title)
+        if time_match:
+            time_str = time_match.group(1)
+        else:
+            # Search entire page header text
+            full_text = soup.get_text()
+            time_match = re.search(r'\b([0-2]?[0-9]:[0-5][0-9])\b', full_text)
+            if time_match:
+                time_str = time_match.group(1)
+            else:
+                time_str = "14:00"
 
         runners = []
         horse_elements = soup.find_all(class_=re.compile(r'HorseName|runner-name', re.I))
