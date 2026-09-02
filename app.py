@@ -583,4 +583,148 @@ with tab3:
     )
     
     conn.close()
+    
+import sqlite3
+import datetime
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+
+DB_FILE = "engine_database.db"
+
+def fetch_sporting_life_results(date_str):
+    """
+    Fetches completed race results from Sporting Life for a given date (YYYY-MM-DD).
+    Returns a dictionary mapping (course, race_time) -> list of placed horse names.
+    """
+    url = f"https://www.sportinglife.com/racing/results/{date_str}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    results_data = {}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return results_data
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Find all race card blocks
+        race_cards = soup.find_all('div', class_=lambda c: c and 'RacingResultCard' in c or 'ResultCard' in c)
+        
+        for card in race_cards:
+            header = card.find('span', class_=lambda c: c and 'Header' in c)
+            time_el = card.find('span', class_=lambda c: c and 'Time' in c)
+            
+            if not header or not time_el:
+                continue
+                
+            course_name = header.text.strip().lower()
+            race_time = time_el.text.strip()
+            
+            # Extract finishing positions
+            runners = card.find_all('li', class_=lambda c: c and 'Runner' in c)
+            finishing_order = []
+            
+            for runner in runners:
+                name_el = runner.find('span', class_=lambda c: c and 'Name' in c)
+                if name_el:
+                    finishing_order.append(name_el.text.strip().upper())
+                    
+            if finishing_order:
+                key = (course_name, race_time)
+                results_data[key] = finishing_order
+                
+    except Exception as e:
+        print(f"Error scraping Sporting Life: {e}")
+        
+    return results_data
+
+
+def auto_settle_ledger(date_str=None, place_terms=0.25):
+    """
+    Scrapes Sporting Life for finished races on date_str (defaults to today) 
+    and auto-settles all PENDING bets in engine_database.db.
+    """
+    if date_str is None:
+        date_str = datetime.date.today().strftime("%Y-%m-%d")
+        
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # Fetch pending bets for the specified date
+    c.execute("""
+        SELECT id, course, race_time, horse_name, stake, odds_decimal, selection_type 
+        FROM bet_ledger 
+        WHERE result = 'PENDING' AND race_date = ?
+    """, (date_str,))
+    
+    pending_bets = c.fetchall()
+    
+    if not pending_bets:
+        conn.close()
+        return "No pending bets found to settle for " + date_str
+        
+    # Fetch results from Sporting Life
+    scraped_results = fetch_sporting_life_results(date_str)
+    
+    if not scraped_results:
+        conn.close()
+        return "Could not retrieve results from Sporting Life for " + date_str
+        
+    settled_count = 0
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    for bet in pending_bets:
+        bet_id, course, race_time, horse_name, stake, odds_decimal, sel_type = bet
+        
+        # Format keys for fuzzy/clean matching
+        clean_course = course.strip().lower()
+        clean_time = race_time.strip()
+        clean_horse = horse_name.strip().upper()
+        
+        lookup_key = (clean_course, clean_time)
+        
+        if lookup_key in scraped_results:
+            finishing_list = scraped_results[lookup_key]
+            
+            if clean_horse in finishing_list:
+                position = finishing_list.index(clean_horse) + 1
+                
+                if position == 1:
+                    outcome = "WIN"
+                    return_amt = stake * odds_decimal
+                    net_pnl = return_amt - stake
+                elif position in [2, 3]:  # Standard place positions
+                    outcome = "PLACE"
+                    place_decimal = ((odds_decimal - 1.0) * place_terms) + 1.0
+                    return_amt = stake * place_decimal
+                    net_pnl = return_amt - stake
+                else:
+                    outcome = "LOSS"
+                    return_amt = 0.0
+                    net_pnl = -stake
+                    
+                # Update bet ledger
+                c.execute("""
+                    UPDATE bet_ledger 
+                    SET result = ?, return_amount = ?, net_profit = ?
+                    WHERE id = ?
+                """, (outcome, return_amt, net_pnl, bet_id))
+                
+                # Log to audit table
+                audit_note = f"Auto-settled Bet ID {bet_id} ({horse_name}) as {outcome} (Pos: {position}). Net: £{net_pnl:.2f}"
+                c.execute("""
+                    INSERT INTO audit_log (timestamp, engine_version, action, notes)
+                    VALUES (?, 'v5.26.4', 'AUTO_SETTLE', ?)
+                """, (now, audit_note))
+                
+                settled_count += 1
+                
+    conn.commit()
+    conn.close()
+    
+    return f"Successfully auto-settled {settled_count} bet(s) for {date_str}."
 
