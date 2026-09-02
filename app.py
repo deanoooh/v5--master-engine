@@ -329,7 +329,7 @@ with tab1:
                 r_time = st.session_state.get(f"time_{r_num}") or meta.get('race_time') or None
                 p_val = st.session_state.get(f"p_{r_num}")
                 s_val = st.session_state.get(f"s_{r_num}")
-                c_val = st.session_state.get(f"c_{r_num}")
+                c_val = st.session_state.get(f"c_{r_num}")i
                 
                 c.execute('''
                     INSERT INTO race_selections (race_date, race_time, course, primary_horse, secondary_horse, chaos_horse, active_runners, ew_eligible)
@@ -355,3 +355,232 @@ with tab3:
         st.write(rows)
     else:
         st.info("No recorded selections yet.")
+import sqlite3
+import datetime
+import pandas as pd
+import streamlit as st
+
+# ==========================================
+# 1. DATABASE MANAGEMENT SETUP (SQLite)
+# ==========================================
+
+DB_FILE = "engine_database.db"
+
+def init_db():
+    """Initializes SQLite database tables for P&L tracking, Audit logs, and Engine performance."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # Table 1: Race Selections & Bets Tracked
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS bet_ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_date TEXT,
+            race_time TEXT,
+            course TEXT,
+            distance TEXT,
+            going TEXT,
+            selection_type TEXT, -- PRIMARY, SECONDARY, CHAOS
+            horse_name TEXT,
+            odds_fractional TEXT,
+            odds_decimal REAL,
+            confidence_score INTEGER,
+            no_bet_flag INTEGER, -- 1 if No Bet applied, 0 otherwise
+            stake REAL,
+            result TEXT DEFAULT 'PENDING', -- PENDING, WIN, LOSS, PLACE, VOID
+            return_amount REAL DEFAULT 0.0,
+            net_profit REAL DEFAULT 0.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Table 2: Engine Audit & Change Log
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            engine_version TEXT,
+            action TEXT,
+            notes TEXT
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ==========================================
+# 2. HELPER FUNCTIONS FOR CALCULATIONS
+# ==========================================
+
+def parse_fractional_odds(odds_str):
+    """Converts fractional odds string (e.g. '7/2', '11/8') to decimal odds."""
+    try:
+        if '/' in odds_str:
+            num, den = map(float, odds_str.split('/'))
+            return round((num / den) + 1.0, 2)
+        else:
+            return round(float(odds_str) + 1.0, 2)
+    except Exception:
+        return 2.00
+
+def log_audit_entry(version, action, notes):
+    """Logs changes and events into the database audit trail."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT INTO audit_log (timestamp, engine_version, action, notes) VALUES (?, ?, ?, ?)",
+              (now, version, action, notes))
+    conn.commit()
+    conn.close()
+
+# ==========================================
+# 3. STREAMLIT INTERFACE: P&L & DATABASE
+# ==========================================
+
+st.title("🏇 Racing Dashboard: P&L, Audit & Database")
+
+# Navigation Tabs
+tab1, tab2, tab3 = st.tabs(["📊 P&L & Performance Audit", "➕ Log New Selections", "🗄️ Database Management"])
+
+# --- TAB 1: P&L & PERFORMANCE AUDIT ---
+with tab1:
+    st.header("Profit & Loss Ledger")
+    
+    conn = sqlite3.connect(DB_FILE)
+    df_ledger = pd.read_sql_query("SELECT * FROM bet_ledger ORDER BY race_date DESC, race_time DESC", conn)
+    conn.close()
+    
+    if df_ledger.empty:
+        st.info("No recorded bets in the database yet. Log selections in the next tab.")
+    else:
+        # Key Performance Metrics
+        settled_bets = df_ledger[df_ledger['result'] != 'PENDING']
+        total_staked = settled_bets['stake'].sum()
+        total_profit = settled_bets['net_profit'].sum()
+        total_bets = len(settled_bets)
+        wins = len(settled_bets[settled_bets['result'] == 'WIN'])
+        strike_rate = (wins / total_bets * 100) if total_bets > 0 else 0.0
+        roi = (total_profit / total_staked * 100) if total_staked > 0 else 0.0
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Staked", f"£{total_staked:.2f}")
+        col2.metric("Net Profit / Loss", f"£{total_profit:.2f}", delta=f"{total_profit:.2f}")
+        col3.metric("Strike Rate", f"{strike_rate:.1f}%")
+        col4.metric("ROI", f"{roi:.1f}%")
+        
+        st.subheader("Settle Pending Bets")
+        pending_bets = df_ledger[df_ledger['result'] == 'PENDING']
+        
+        if not pending_bets.empty:
+            for idx, row in pending_bets.iterrows():
+                with st.expander(f"{row['race_date']} {row['race_time']} {row['course']} – {row['horse_name']} ({row['selection_type']})"):
+                    st.write(f"**Odds:** {row['odds_fractional']} | **Stake:** £{row['stake']:.2f} | **No Bet Filter:** {'Active 🔴' if row['no_bet_flag'] == 1 else 'Passed 🟢'}")
+                    
+                    res_col1, res_col2 = st.columns([2, 1])
+                    new_result = res_col1.selectbox("Outcome", ["WIN", "LOSS", "PLACE", "VOID"], key=f"res_{row['id']}")
+                    
+                    if res_col2.button("Settle Bet", key=f"btn_{row['id']}"):
+                        dec_odds = row['odds_decimal']
+                        stake = row['stake']
+                        
+                        if new_result == "WIN":
+                            ret = stake * dec_odds
+                            net = ret - stake
+                        elif new_result == "LOSS":
+                            ret = 0.0
+                            net = -stake
+                        elif new_result == "VOID":
+                            ret = stake
+                            net = 0.0
+                        else:  # PLACE adjustment (assuming half stake or EW terms)
+                            ret = stake * (1 + (dec_odds - 1) / 4)
+                            net = ret - stake
+
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        c.execute("""
+                            UPDATE bet_ledger 
+                            SET result = ?, return_amount = ?, net_profit = ?
+                            WHERE id = ?
+                        """, (new_result, ret, net, row['id']))
+                        conn.commit()
+                        conn.close()
+                        
+                        log_audit_entry("v5.26.4", "SETTLE_BET", f"Settled Bet ID {row['id']} ({row['horse_name']}) as {new_result}. Net: £{net:.2f}")
+                        st.success(f"Updated {row['horse_name']} to {new_result}!")
+                        st.rerun()
+        else:
+            st.success("All logged bets are currently settled.")
+
+# --- TAB 2: LOG NEW SELECTIONS ---
+with tab2:
+    st.header("Log Master Engine Selections")
+    
+    with st.form("log_selection_form"):
+        col1, col2, col3 = st.columns(3)
+        race_date = col1.date_input("Date", datetime.date.today())
+        race_time = col2.text_input("Race Time", "17:30")
+        course = col3.text_input("Course", "Kempton")
+        
+        col4, col5 = st.columns(2)
+        distance = col4.text_input("Distance", "7f")
+        going = col5.text_input("Going", "Standard to Slow")
+        
+        st.divider()
+        sel_type = st.selectbox("Selection Tier", ["PRIMARY", "SECONDARY", "CHAOS"])
+        horse_name = st.text_input("Horse Name", "Superstorm")
+        odds_frac = st.text_input("Fractional Odds", "5/1")
+        confidence = st.slider("Confidence Score", 1, 10, 8)
+        
+        no_bet_active = st.checkbox("Apply 🔴 No Bet Filter (Flagged for tracking only)")
+        stake_amount = st.number_input("Stake (£)", min_value=0.0, value=10.0, step=1.0)
+        
+        submit = st.form_submit_button("Record Selection into Database")
+        
+        if submit:
+            dec_odds = parse_fractional_odds(odds_frac)
+            flag_val = 1 if no_bet_active else 0
+            
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO bet_ledger 
+                (race_date, race_time, course, distance, going, selection_type, horse_name, odds_fractional, odds_decimal, confidence_score, no_bet_flag, stake)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (str(race_date), race_time, course, distance, going, sel_type, horse_name, odds_frac, dec_odds, confidence, flag_val, stake_amount))
+            conn.commit()
+            conn.close()
+            
+            log_audit_entry("v5.26.4", "ADD_SELECTION", f"Logged {sel_type}: {horse_name} ({odds_frac}) at {course} {race_time}")
+            st.success(f"Successfully added {horse_name} ({sel_type}) to database!")
+
+# --- TAB 3: DATABASE MANAGEMENT & AUDIT LOGS ---
+with tab3:
+    st.header("Database Operations & Audit Log")
+    
+    conn = sqlite3.connect(DB_FILE)
+    
+    st.subheader("Audit Trail")
+    df_audit = pd.read_sql_query("SELECT * FROM audit_log ORDER BY id DESC LIMIT 20", conn)
+    st.dataframe(df_audit, use_container_width=True)
+    
+    st.subheader("Raw Ledger Records")
+    df_raw = pd.read_sql_query("SELECT * FROM bet_ledger ORDER BY id DESC", conn)
+    st.dataframe(df_raw, use_container_width=True)
+    
+    st.divider()
+    st.subheader("Database Maintenance")
+    
+    # Export capability for iPhone/Mac syncing
+    csv_data = df_raw.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Database Backup (CSV)",
+        data=csv_data,
+        file_name=f"engine_database_backup_{datetime.date.today()}.csv",
+        mime='text/csv'
+    )
+    
+    conn.close()
+
