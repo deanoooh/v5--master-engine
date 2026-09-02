@@ -329,7 +329,7 @@ with tab1:
                 r_time = st.session_state.get(f"time_{r_num}") or meta.get('race_time') or None
                 p_val = st.session_state.get(f"p_{r_num}")
                 s_val = st.session_state.get(f"s_{r_num}")
-                c_val = st.session_state.get(f"c_{r_num}")i
+                c_val = st.session_state.get(f"c_{r_num}")
                 
                 c.execute('''
                     INSERT INTO race_selections (race_date, race_time, course, primary_horse, secondary_horse, chaos_horse, active_runners, ew_eligible)
