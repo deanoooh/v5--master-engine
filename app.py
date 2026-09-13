@@ -60,6 +60,7 @@ def clean_horse_name(raw_name):
     return name
 
 
+
 # Helper: robust time parsing
 def _try_parse_time_value(val):
  """Return 'HH:MM' if we can parse val, else None."""
