@@ -65,7 +65,7 @@ def clean_horse_name(raw_name):
 # Helper: robust time parsing
 def _try_parse_time_value(val):
  """Return 'HH:MM' if we can parse val, else None."""
-   if val is None:
+  if val is None:
  return None
  s = str(val).strip()
  if not s:
