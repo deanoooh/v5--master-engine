@@ -64,24 +64,24 @@ def clean_horse_name(raw_name):
 
 # Helper: robust time parsing
 def _try_parse_time_value(val):
- """Return 'HH:MM' if we can parse val, else None."""
- if val is None:
- return None
- s = str(val).strip()
- if not s:
- return None
- # 1) HH:MM anywhere (e.g., ISO or plain)
- m = re.search(r'(\d{2}:\d{2})', s)
- if m:
- return m.group(1)
- # 2) Numeric epoch (string or number)
- try:
- num = float(s)
- if num > 1000000000:
- return datetime.fromtimestamp(num).strftime('%H:%M')
- except Exception:
- pass
- return None
+    """Return 'HH:MM' if we can parse val, else None."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    # 1) HH:MM anywhere (e.g., ISO or plain)
+    m = re.search(r'(\d{2}:\d{2})', s)
+    if m:
+        return m.group(1)
+    # 2) Numeric epoch (string or number)
+    try:
+        num = float(s)
+        if num > 1000000000:
+            return datetime.fromtimestamp(num).strftime('%H:%M')
+    except Exception:
+        pass
+    return None
 
 # Sporting Life Scraper Function
 def parse_sporting_life_racecard(url):
