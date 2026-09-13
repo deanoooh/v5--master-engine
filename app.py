@@ -34,22 +34,31 @@ def init_db():
 
 init_db()
 
-# Horse Name Cleaner
 def clean_horse_name(raw_name):
- if not raw_name:
- return ""
- name = str(raw_name).strip()
- 
- country_suffix = ""
- country_match = re.search(r'\s*\([A-Z]{2,3}\)$', name)
- if country_match:
- country_suffix = country_match.group(0)
- name = name[:country_match.start()].strip()
- 
- name = re.sub(r'[pvhbetcPVHBETC]?\d+$', '', name).strip()
- name = re.sub(r'[\s\-\(]+[pvhbetcPVHBETC]\)?$', '', name).strip()
- 
- return name + country_suffix
+    """
+    Safer horse-name cleaner:
+      - Normalise whitespace
+      - Remove explicit country suffixes like (GB), (IRE)
+      - Remove trailing numeric cloth numbers
+      - Remove explicit form/status suffixes only when clearly separated
+    """
+    if not raw_name:
+        return ""
+
+    name = re.sub(r"\s+", " ", str(raw_name)).strip()
+
+    # Remove country suffix only when clearly formatted as (GB), (IRE), etc.
+    name = re.sub(r"\s+\\([A-Z]{2,3}\\)$", "", name).strip()
+
+    # Remove only a trailing numeric cloth number, e.g. "Horse Name 7"
+    name = re.sub(r"\s+\d+$", "", name).strip()
+
+    # Remove explicit form/status suffixes only when separated
+    name = re.sub(r"\s+\\((?:p|v|h|b|e|t|c)\\)$", "", name, flags=re.I)
+    name = re.sub(r"\s+-\s*(?:p|v|h|b|e|t|c)$", "", name, flags=re.I)
+
+    return name
+
 
 # Helper: robust time parsing
 def _try_parse_time_value(val):
