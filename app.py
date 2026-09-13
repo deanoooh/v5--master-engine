@@ -35,9 +35,6 @@ def init_db():
 init_db()
 
 
-So the full `clean_horse_name` function should look like this:
-
-```python
 def clean_horse_name(raw_name):
     """
     Safer horse-name cleaner:
